@@ -246,10 +246,10 @@ type Server struct {
 	MsgInvalidFunc MsgInvalidFunc
 
 	// Shutdown handling
-	lock     sync.RWMutex
-	started  bool
-	shutdown chan struct{}
-	conns    map[net.Conn]struct{}
+	lock           sync.RWMutex
+	started        bool
+	shutdown       chan struct{}
+	conns          map[net.Conn]struct{}
 
 	// A pool for UDP message buffers.
 	udpPool sync.Pool
