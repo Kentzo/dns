@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,9 +55,6 @@ type ResponseWriter interface {
 	TsigStatus() error
 	// TsigTimersOnly sets the tsig timers only boolean.
 	TsigTimersOnly(bool)
-	// Hijack lets the caller take over the connection.
-	// After a call to Hijack(), the DNS package will not do anything with the connection.
-	Hijack()
 }
 
 // A ConnectionStater interface is used by a DNS Handler to access TLS connection state
@@ -65,9 +63,20 @@ type ConnectionStater interface {
 	ConnectionState() *tls.ConnectionState
 }
 
+// maybeAtomicBool is a common interface for atomic and non-atomic booleans.
+type maybeAtomicBool interface {
+	Load() bool
+	Store(bool)
+	CompareAndSwap(bool, bool) bool
+}
+
+// nonAtomicBool wraps bool to implement maybeAtomicBool.
+type nonAtomicBool struct {
+	bool
+}
+
 type response struct {
-	closed         bool // connection has been closed
-	hijacked       bool // connection has been hijacked by handler
+	closed         maybeAtomicBool // connection has been closed; atomic when pipelining
 	tsigTimersOnly bool
 	tsigStatus     error
 	tsigRequestMAC string
@@ -202,6 +211,8 @@ type Server struct {
 	Addr string
 	// if "tcp" or "tcp-tls" (DNS over TLS) it will invoke a TCP listener, otherwise an UDP one
 	Net string
+	// On TCP, enables concurrent calls to Handler.ServeDNS. UDP is always pipelined.
+	PipelineTCPQueries bool
 	// TCP Listener to use, this is to aid in systemd's socket activation.
 	Listener net.Listener
 	// TLS connection configuration
@@ -558,6 +569,11 @@ func (srv *Server) serveUDP(l net.PacketConn) error {
 // Serve a new TCP connection.
 func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 	w := &response{tsigProvider: srv.tsigProvider(), tcp: rw}
+	if srv.PipelineTCPQueries {
+		w.closed = &atomic.Bool{}
+	} else {
+		w.closed = &nonAtomicBool{}
+	}
 	if srv.DecorateWriter != nil {
 		w.writer = srv.DecorateWriter(w)
 	} else {
@@ -587,21 +603,26 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 			// TODO(tmthrgd): handle error
 			break
 		}
-		srv.serveDNS(m, w)
-		if w.closed {
-			break // Close() was called
+		if srv.PipelineTCPQueries {
+			wg.Add(1)
+			// Per-request copy of response.
+			pipelineW := *w
+			go func() {
+				defer wg.Done()
+				srv.serveDNS(m, &pipelineW)
+			}()
+		} else {
+			srv.serveDNS(m, w)
 		}
-		if w.hijacked {
-			break // client will call Close() themselves
+		if w.closed.Load() {
+			break // Close() was called
 		}
 		// The first read uses the read timeout, the rest use the
 		// idle timeout.
 		timeout = idleTimeout
 	}
 
-	if !w.hijacked {
-		w.Close()
-	}
+	w.Close()
 
 	srv.lock.Lock()
 	delete(srv.conns, w.tcp)
@@ -612,7 +633,13 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 
 // Serve a new UDP request.
 func (srv *Server) serveUDPPacket(wg *sync.WaitGroup, m []byte, u net.PacketConn, udpSession *SessionUDP, pcSession net.Addr) {
-	w := &response{tsigProvider: srv.tsigProvider(), udp: u, udpSession: udpSession, pcSession: pcSession}
+	w := &response{
+		closed:       &nonAtomicBool{},
+		tsigProvider: srv.tsigProvider(),
+		udp:          u,
+		udpSession:   udpSession,
+		pcSession:    pcSession,
+	}
 	if srv.DecorateWriter != nil {
 		w.writer = srv.DecorateWriter(w)
 	} else {
@@ -743,7 +770,7 @@ func (srv *Server) readPacketConn(conn net.PacketConn, timeout time.Duration) ([
 
 // WriteMsg implements the ResponseWriter.WriteMsg method.
 func (w *response) WriteMsg(m *Msg) (err error) {
-	if w.closed {
+	if w.closed.Load() {
 		return &Error{err: "WriteMsg called after Close"}
 	}
 
@@ -766,9 +793,25 @@ func (w *response) WriteMsg(m *Msg) (err error) {
 	return err
 }
 
+func (b *nonAtomicBool) Load() bool {
+	return b.bool
+}
+
+func (b *nonAtomicBool) Store(value bool) {
+	b.bool = value
+}
+
+func (b *nonAtomicBool) CompareAndSwap(old, new bool) bool {
+	if b.bool == old {
+		b.bool = new
+		return true
+	}
+	return false
+}
+
 // Write implements the ResponseWriter.Write method.
 func (w *response) Write(m []byte) (int, error) {
-	if w.closed {
+	if w.closed.Load() {
 		return 0, &Error{err: "Write called after Close"}
 	}
 
@@ -824,15 +867,11 @@ func (w *response) TsigStatus() error { return w.tsigStatus }
 // TsigTimersOnly implements the ResponseWriter.TsigTimersOnly method.
 func (w *response) TsigTimersOnly(b bool) { w.tsigTimersOnly = b }
 
-// Hijack implements the ResponseWriter.Hijack method.
-func (w *response) Hijack() { w.hijacked = true }
-
 // Close implements the ResponseWriter.Close method
 func (w *response) Close() error {
-	if w.closed {
+	if !w.closed.CompareAndSwap(false, true) {
 		return &Error{err: "connection already closed"}
 	}
-	w.closed = true
 
 	switch {
 	case w.udp != nil:
