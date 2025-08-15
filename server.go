@@ -41,6 +41,11 @@ func (f HandlerFunc) ServeDNS(w ResponseWriter, r *Msg) {
 // A ResponseWriter interface is used by an DNS handler to
 // construct an DNS response.
 type ResponseWriter interface {
+	// Context returns the request's context.
+	//
+	// Context is cancelled when the client's connection is closed or
+	// when server's shutdown is requested.
+	Context() context.Context
 	// LocalAddr returns the net.Addr of the server
 	LocalAddr() net.Addr
 	// RemoteAddr returns the net.Addr of the client that sent the current request.
@@ -86,6 +91,7 @@ type response struct {
 	udpSession     *SessionUDP    // oob data to get egress interface right
 	pcSession      net.Addr       // address to use when writing to a generic net.PacketConn
 	writer         Writer         // writer to output the raw DNS bits
+	ctx            context.Context
 }
 
 // handleRefused returns a HandlerFunc that returns REFUSED for every request it gets.
@@ -257,10 +263,12 @@ type Server struct {
 	MsgInvalidFunc MsgInvalidFunc
 
 	// Shutdown handling
-	lock     sync.RWMutex
-	started  bool
-	shutdown chan struct{}
-	conns    map[net.Conn]struct{}
+	lock           sync.RWMutex
+	started        bool
+	shutdown       chan struct{}
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+	conns          map[net.Conn]struct{}
 
 	// A pool for UDP message buffers.
 	udpPool sync.Pool
@@ -291,6 +299,7 @@ func makeUDPBuffer(size int) func() interface{} {
 
 func (srv *Server) init() {
 	srv.shutdown = make(chan struct{})
+	srv.shutdownCtx, srv.shutdownCancel = context.WithCancel(context.Background())
 	srv.conns = make(map[net.Conn]struct{})
 
 	if srv.UDPSize == 0 {
@@ -444,6 +453,8 @@ func (srv *Server) ShutdownContext(ctx context.Context) error {
 		testShutdownNotify.Broadcast()
 	}
 
+	srv.shutdownCancel()
+
 	var ctxErr error
 	select {
 	case <-srv.shutdown:
@@ -568,7 +579,9 @@ func (srv *Server) serveUDP(l net.PacketConn) error {
 
 // Serve a new TCP connection.
 func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
-	w := &response{tsigProvider: srv.tsigProvider(), tcp: rw}
+	connCtx, cancelConnCtx := context.WithCancel(srv.shutdownCtx)
+	defer cancelConnCtx()
+	w := &response{ctx: connCtx, tsigProvider: srv.tsigProvider(), tcp: rw}
 	if srv.PipelineTCPQueries {
 		w.closed = &atomic.Bool{}
 	} else {
@@ -621,6 +634,7 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 	}
 
 	w.Close()
+	cancelConnCtx()
 
 	srv.lock.Lock()
 	delete(srv.conns, w.tcp)
@@ -632,6 +646,7 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 // Serve a new UDP request.
 func (srv *Server) serveUDPPacket(wg *sync.WaitGroup, m []byte, u net.PacketConn, udpSession *SessionUDP, pcSession net.Addr) {
 	w := &response{
+		ctx:          srv.shutdownCtx,
 		closed:       &nonAtomicBool{},
 		tsigProvider: srv.tsigProvider(),
 		udp:          u,
@@ -805,6 +820,10 @@ func (b *nonAtomicBool) CompareAndSwap(old, new bool) bool {
 		return true
 	}
 	return false
+}
+
+func (w *response) Context() context.Context {
+	return w.ctx
 }
 
 // Write implements the ResponseWriter.Write method.
