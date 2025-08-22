@@ -681,6 +681,13 @@ func (srv *Server) serveDNS(m []byte, w *response) {
 		}
 
 		return
+	case MsgAbort:
+		if w.udp != nil && cap(m) == srv.UDPSize {
+			srv.udpPool.Put(m[:srv.UDPSize])
+		}
+
+		w.Abort()
+		return
 	}
 
 	w.tsigStatus = nil

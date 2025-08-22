@@ -28,6 +28,7 @@ const (
 	MsgReject                                      // Reject the message with a RcodeFormatError
 	MsgIgnore                                      // Ignore the error and send nothing back.
 	MsgRejectNotImplemented                        // Reject the message with a RcodeNotImplemented
+	MsgAbort                                       // Forcibly abort the connection
 )
 
 func defaultMsgAcceptFunc(dh Header) MsgAcceptAction {
