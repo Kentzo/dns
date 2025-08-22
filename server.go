@@ -68,20 +68,8 @@ type ConnectionStater interface {
 	ConnectionState() *tls.ConnectionState
 }
 
-// maybeAtomicBool is a common interface for atomic and non-atomic booleans.
-type maybeAtomicBool interface {
-	Load() bool
-	Store(bool)
-	CompareAndSwap(bool, bool) bool
-}
-
-// nonAtomicBool wraps bool to implement maybeAtomicBool.
-type nonAtomicBool struct {
-	bool
-}
-
 type response struct {
-	closed         maybeAtomicBool // connection has been closed; atomic when pipelining
+	closed         atomic.Bool // connection has been closed
 	tsigTimersOnly bool
 	tsigStatus     error
 	tsigRequestMAC string
@@ -217,8 +205,6 @@ type Server struct {
 	Addr string
 	// if "tcp" or "tcp-tls" (DNS over TLS) it will invoke a TCP listener, otherwise an UDP one
 	Net string
-	// On TCP, enables concurrent calls to Handler.ServeDNS. UDP is always pipelined.
-	PipelineTCPQueries bool
 	// TCP Listener to use, this is to aid in systemd's socket activation.
 	Listener net.Listener
 	// TLS connection configuration
@@ -582,11 +568,6 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 	connCtx, cancelConnCtx := context.WithCancel(srv.shutdownCtx)
 	defer cancelConnCtx()
 	w := &response{ctx: connCtx, tsigProvider: srv.tsigProvider(), tcp: rw}
-	if srv.PipelineTCPQueries {
-		w.closed = &atomic.Bool{}
-	} else {
-		w.closed = &nonAtomicBool{}
-	}
 	if srv.DecorateWriter != nil {
 		w.writer = srv.DecorateWriter(w)
 	} else {
@@ -611,7 +592,6 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 			// TODO(tmthrgd): handle error
 			break
 		}
-		if srv.PipelineTCPQueries {
 			wg.Add(1)
 			// Per-request copy of response.
 			pipelineW := *w
@@ -619,9 +599,6 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 				defer wg.Done()
 				srv.serveDNS(m, &pipelineW)
 			}()
-		} else {
-			srv.serveDNS(m, w)
-		}
 		if w.closed.Load() {
 			break // Close() was called
 		}
@@ -647,7 +624,6 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 func (srv *Server) serveUDPPacket(wg *sync.WaitGroup, m []byte, u net.PacketConn, udpSession *SessionUDP, pcSession net.Addr) {
 	w := &response{
 		ctx:          srv.shutdownCtx,
-		closed:       &nonAtomicBool{},
 		tsigProvider: srv.tsigProvider(),
 		udp:          u,
 		udpSession:   udpSession,
@@ -804,22 +780,6 @@ func (w *response) WriteMsg(m *Msg) (err error) {
 	}
 	_, err = w.writer.Write(data)
 	return err
-}
-
-func (b *nonAtomicBool) Load() bool {
-	return b.bool
-}
-
-func (b *nonAtomicBool) Store(value bool) {
-	b.bool = value
-}
-
-func (b *nonAtomicBool) CompareAndSwap(old, new bool) bool {
-	if b.bool == old {
-		b.bool = new
-		return true
-	}
-	return false
 }
 
 func (w *response) Context() context.Context {
