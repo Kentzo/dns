@@ -56,6 +56,8 @@ type ResponseWriter interface {
 	Write([]byte) (int, error)
 	// Close closes the connection.
 	Close() error
+	// Abort closes the connection with TCP RST.
+	Abort() error
 	// TsigStatus returns the status of the Tsig.
 	TsigStatus() error
 	// TsigTimersOnly sets the tsig timers only boolean.
@@ -592,13 +594,13 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 			// TODO(tmthrgd): handle error
 			break
 		}
-			wg.Add(1)
-			// Per-request copy of response.
-			pipelineW := *w
-			go func() {
-				defer wg.Done()
-				srv.serveDNS(m, &pipelineW)
-			}()
+		wg.Add(1)
+		// Per-request copy of response.
+		pipelineW := *w
+		go func() {
+			defer wg.Done()
+			srv.serveDNS(m, &pipelineW)
+		}()
 		if w.closed.Load() {
 			break // Close() was called
 		}
@@ -861,6 +863,11 @@ func (w *response) Close() error {
 	}
 }
 
+func (w *response) Abort() error {
+	setLinger(w.tcp, 0)
+	return w.Close()
+}
+
 // ConnectionState() implements the ConnectionStater.ConnectionState() interface.
 func (w *response) ConnectionState() *tls.ConnectionState {
 	type tlsConnectionStater interface {
@@ -871,4 +878,20 @@ func (w *response) ConnectionState() *tls.ConnectionState {
 		return &t
 	}
 	return nil
+}
+
+// setLinger calls SetLinger on the connection if it's supported.
+func setLinger(co net.Conn, sec int) {
+	if co == nil {
+		return
+	}
+	if _, ok := co.(*net.UDPConn); ok {
+		return
+	}
+	if tlsCo, ok := co.(*tls.Conn); ok {
+		co = tlsCo.NetConn()
+	}
+	if lingerCo, ok := co.(interface{ SetLinger(sec int) error }); ok {
+		lingerCo.SetLinger(sec)
+	}
 }
