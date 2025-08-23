@@ -179,11 +179,11 @@ func IsDSOHeader(dh Header) bool {
 	return isStateful
 }
 
-// IsDSOMsg checks whether Msg is a DSO message.
+// isDSOMsg checks whether Msg is a DSO message.
 //
 // The decision is based on MsgHdr. To verify that message's TLV(s) are appopriate
 // use the IsValidDSOMsg.
-func IsDSOMsg(m *Msg) bool {
+func isDSOMsg(m *Msg) bool {
 	switch {
 	case m == nil:
 		return false
@@ -198,28 +198,28 @@ func IsDSOMsg(m *Msg) bool {
 	}
 }
 
-// IsDSORequest checks whether Msg is a DSO request message.
+// isDSORequest checks whether Msg is a DSO request message.
 //
 // The decision is based on MsgHdr. To verify that message's TLV(s) are appopriate
 // use the IsValidDSOMsg.
-func IsDSORequest(m *Msg) bool {
-	return IsDSOMsg(m) && m.MsgHdr.Id != 0 && !m.MsgHdr.Response && len(m.Stateful) > 0
+func isDSORequest(m *Msg) bool {
+	return isDSOMsg(m) && m.MsgHdr.Id != 0 && !m.MsgHdr.Response && len(m.Stateful) > 0
 }
 
-// IsDSOUnidirectional checks whether Msg is a DSO unidirectional message.
+// isDSOUnidirectional checks whether Msg is a DSO unidirectional message.
 //
 // The decision is based on MsgHdr. To verify that message's TLV(s) are appopriate
 // use the IsValidDSOMsg.
-func IsDSOUnidirectional(m *Msg) bool {
-	return IsDSOMsg(m) && m.MsgHdr.Id == 0 && !m.MsgHdr.Response && len(m.Stateful) > 0
+func isDSOUnidirectional(m *Msg) bool {
+	return isDSOMsg(m) && m.MsgHdr.Id == 0 && !m.MsgHdr.Response && len(m.Stateful) > 0
 }
 
-// IsDSOResponse checks whether Msg is a DSO unidirectional message.
+// isDSOResponse checks whether Msg is a DSO unidirectional message.
 //
 // The decision is based on MsgHdr. To verify that message's TLV(s) are appopriate
 // use the IsValidDSOMsg.
-func IsDSOResponse(m *Msg) bool {
-	return IsDSOMsg(m) && m.MsgHdr.Id != 0 && m.MsgHdr.Response
+func isDSOResponse(m *Msg) bool {
+	return isDSOMsg(m) && m.MsgHdr.Id != 0 && m.MsgHdr.Response
 }
 
 // IsValidDSOMsg checks that Msg, including its TLVs, is valid when composed on server (server = true)
@@ -229,10 +229,10 @@ func IsDSOResponse(m *Msg) bool {
 // Validation errors are fatal and must be followed up by forcibly closing the connection.
 // Error type indicates invalid part of the message.
 func IsValidDSOMsg(m *Msg, server bool, req *Msg) error {
-	if !IsDSOMsg(m) {
+	if !isDSOMsg(m) {
 		return &Error{"invalid dso header"}
 	}
-	if req != nil && !IsDSORequest(req) {
+	if req != nil && !isDSORequest(req) {
 		return &Error{"req is invalid dso request"}
 	}
 	// RFC 8490, Section 5.4.1: If a DSO response message (QR=1) is received where the
@@ -1114,13 +1114,13 @@ type tlvUsage struct {
 	msg         *Msg
 }
 
-func (u tlvUsage) c_p() bool { return !u.server && IsDSORequest(u.msg) && u.primary }
-func (u tlvUsage) c_u() bool { return !u.server && IsDSOUnidirectional(u.msg) && u.primary }
-func (u tlvUsage) c_a() bool { return !u.server && !IsDSOResponse(u.msg) && !u.primary }
-func (u tlvUsage) crp() bool { return u.server && IsDSOResponse(u.msg) && u.respPrimary }
-func (u tlvUsage) cra() bool { return u.server && IsDSOResponse(u.msg) && !u.respPrimary }
-func (u tlvUsage) s_p() bool { return u.server && IsDSORequest(u.msg) && u.primary }
-func (u tlvUsage) s_u() bool { return u.server && IsDSOUnidirectional(u.msg) && u.primary }
-func (u tlvUsage) s_a() bool { return u.server && !IsDSOResponse(u.msg) && !u.primary }
-func (u tlvUsage) srp() bool { return !u.server && IsDSOResponse(u.msg) && u.respPrimary }
-func (u tlvUsage) sra() bool { return !u.server && IsDSOResponse(u.msg) && !u.respPrimary }
+func (u tlvUsage) c_p() bool { return !u.server && isDSORequest(u.msg) && u.primary }
+func (u tlvUsage) c_u() bool { return !u.server && isDSOUnidirectional(u.msg) && u.primary }
+func (u tlvUsage) c_a() bool { return !u.server && !isDSOResponse(u.msg) && !u.primary }
+func (u tlvUsage) crp() bool { return u.server && isDSOResponse(u.msg) && u.respPrimary }
+func (u tlvUsage) cra() bool { return u.server && isDSOResponse(u.msg) && !u.respPrimary }
+func (u tlvUsage) s_p() bool { return u.server && isDSORequest(u.msg) && u.primary }
+func (u tlvUsage) s_u() bool { return u.server && isDSOUnidirectional(u.msg) && u.primary }
+func (u tlvUsage) s_a() bool { return u.server && !isDSOResponse(u.msg) && !u.primary }
+func (u tlvUsage) srp() bool { return !u.server && isDSOResponse(u.msg) && u.respPrimary }
+func (u tlvUsage) sra() bool { return !u.server && isDSOResponse(u.msg) && !u.respPrimary }
