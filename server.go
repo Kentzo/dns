@@ -50,6 +50,8 @@ type ResponseWriter interface {
 	LocalAddr() net.Addr
 	// RemoteAddr returns the net.Addr of the client that sent the current request.
 	RemoteAddr() net.Addr
+	// Conn returns the underlying connection.
+	Conn() net.Conn
 	// WriteMsg writes a reply back to the client.
 	WriteMsg(*Msg) error
 	// Write writes a raw buffer back to the client.
@@ -844,6 +846,14 @@ func (w *response) RemoteAddr() net.Addr {
 		return w.tcp.RemoteAddr()
 	default:
 		panic("dns: internal error: udpSession, pcSession and tcp are all nil")
+	}
+}
+
+func (w *response) Conn() net.Conn {
+	if w.udp != nil {
+		return w.udp.(net.Conn)
+	} else {
+		return w.tcp
 	}
 }
 
