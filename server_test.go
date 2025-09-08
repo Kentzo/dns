@@ -1384,9 +1384,7 @@ func TestResponseAfterClose(t *testing.T) {
 		}
 	}
 
-	rw := &response{
-		closed: &nonAtomicBool{bool: true},
-	}
+	rw := &response{closed: &atomic.Bool{}}
 
 	_, err := rw.Write(make([]byte, 2))
 	testError("Write", err)
@@ -1395,9 +1393,8 @@ func TestResponseAfterClose(t *testing.T) {
 }
 
 func TestResponseDoubleClose(t *testing.T) {
-	rw := &response{
-		closed: &nonAtomicBool{bool: true},
-	}
+	rw := &response{closed: &atomic.Bool{}}
+	rw.closed.Store(true)
 	if err, expect := rw.Close(), "dns: connection already closed"; err == nil || err.Error() != expect {
 		t.Errorf("Close did not return expected: error %q, got: %v", expect, err)
 	}

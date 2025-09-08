@@ -41,29 +41,35 @@ func (f HandlerFunc) ServeDNS(w ResponseWriter, r *Msg) {
 // A ResponseWriter interface is used by an DNS handler to
 // construct an DNS response.
 type ResponseWriter interface {
-	// Context returns the request's context.
-	//
-	// Context is cancelled when the client's connection is closed or
-	// when server's shutdown is requested.
-	Context() context.Context
 	// LocalAddr returns the net.Addr of the server
 	LocalAddr() net.Addr
 	// RemoteAddr returns the net.Addr of the client that sent the current request.
 	RemoteAddr() net.Addr
-	// Conn returns the underlying connection.
-	Conn() net.Conn
 	// WriteMsg writes a reply back to the client.
 	WriteMsg(*Msg) error
 	// Write writes a raw buffer back to the client.
 	Write([]byte) (int, error)
 	// Close closes the connection.
 	Close() error
-	// Abort closes the connection with TCP RST.
-	Abort() error
 	// TsigStatus returns the status of the Tsig.
 	TsigStatus() error
 	// TsigTimersOnly sets the tsig timers only boolean.
 	TsigTimersOnly(bool)
+	// Hijack lets the caller take over the connection.
+	// After a call to Hijack(), the DNS package will not close the connection.
+	Hijack()
+}
+
+type ResponseWriterExtra interface {
+	// Context returns the request's context.
+	//
+	// Context is cancelled when the client's connection is closed or
+	// when server's shutdown is requested.
+	Context() context.Context
+	// Conn returns the underlying connection.
+	Conn() net.Conn
+	// Abort closes the connection with TCP RST.
+	Abort() error
 }
 
 // A ConnectionStater interface is used by a DNS Handler to access TLS connection state
@@ -73,7 +79,8 @@ type ConnectionStater interface {
 }
 
 type response struct {
-	closed         atomic.Bool // connection has been closed
+	closed         *atomic.Bool // connection has been closed
+	hijacked       *atomic.Bool // connection has been hijacked by handler
 	tsigTimersOnly bool
 	tsigStatus     error
 	tsigRequestMAC string
@@ -571,7 +578,13 @@ func (srv *Server) serveUDP(l net.PacketConn) error {
 func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 	connCtx, cancelConnCtx := context.WithCancel(srv.shutdownCtx)
 	defer cancelConnCtx()
-	w := &response{ctx: connCtx, tsigProvider: srv.tsigProvider(), tcp: rw}
+	w := &response{
+		closed:       new(atomic.Bool),
+		hijacked:     new(atomic.Bool),
+		ctx:          connCtx,
+		tsigProvider: srv.tsigProvider(),
+		tcp:          rw,
+	}
 	if srv.DecorateWriter != nil {
 		w.writer = srv.DecorateWriter(w)
 	} else {
@@ -590,22 +603,27 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 		limit = maxTCPQueries
 	}
 
+	// Track per-connection requests.
+	var connWg sync.WaitGroup
+
 	for q := 0; (q < limit || limit == -1) && srv.isStarted(); q++ {
 		m, err := reader.ReadTCP(w.tcp, timeout)
 		if err != nil {
 			// TODO(tmthrgd): handle error
 			break
 		}
-		wg.Add(1)
-		// Per-request copy of response.
-		pipelineW := *w
-		go func() {
-			defer wg.Done()
-			srv.serveDNS(m, &pipelineW)
-		}()
 		if w.closed.Load() {
 			break // Close() was called
 		}
+
+		// Per-request copy of response.
+		pipelineW := *w
+		connWg.Add(1)
+		go func() {
+			defer connWg.Done()
+			srv.serveDNS(m, &pipelineW)
+		}()
+
 		// The first read uses the read timeout, the rest use the
 		// idle timeout.
 		timeout = tcpIdleTimeout
@@ -614,7 +632,10 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 		}
 	}
 
-	w.Close()
+	if !w.hijacked.Load() {
+		w.Close()
+		connWg.Wait()
+	}
 	cancelConnCtx()
 
 	srv.lock.Lock()
@@ -628,6 +649,8 @@ func (srv *Server) serveTCPConn(wg *sync.WaitGroup, rw net.Conn) {
 func (srv *Server) serveUDPPacket(wg *sync.WaitGroup, m []byte, u net.PacketConn, udpSession *SessionUDP, pcSession net.Addr) {
 	w := &response{
 		ctx:          srv.shutdownCtx,
+		closed:       new(atomic.Bool),
+		hijacked:     new(atomic.Bool),
 		tsigProvider: srv.tsigProvider(),
 		udp:          u,
 		udpSession:   udpSession,
@@ -896,6 +919,8 @@ func (w *response) ConnectionState() *tls.ConnectionState {
 	}
 	return nil
 }
+
+func (w *response) Hijack() { w.hijacked.Store(true) }
 
 // setLinger calls SetLinger on the connection if it's supported.
 func setLinger(co net.Conn, sec int) {
