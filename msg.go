@@ -842,45 +842,47 @@ func (dns *Msg) unpack(dh Header, msg []byte, off int) (err error) {
 		return nil
 	}
 
-	// Qdcount, Ancount, Nscount, Arcount can't be trusted, as they are
-	// attacker controlled. This means we can't use them to pre-allocate
-	// slices.
-	dns.Question = nil
-	for i := 0; i < int(dh.Qdcount); i++ {
-		off1 := off
-		var q Question
-		q, off, err = unpackQuestion(msg, off)
-		if err != nil {
-			return err
-		}
-		if off1 == off { // Offset does not increase anymore, dh.Qdcount is a lie!
-			dh.Qdcount = uint16(i)
-			break
-		}
-		dns.Question = append(dns.Question, q)
-	}
-
-	dns.Answer, off, err = unpackRRslice(int(dh.Ancount), msg, off)
-	// The header counts might have been wrong so we need to update it
-	dh.Ancount = uint16(len(dns.Answer))
-	if err == nil {
-		dns.Ns, off, err = unpackRRslice(int(dh.Nscount), msg, off)
-	}
-	// The header counts might have been wrong so we need to update it
-	dh.Nscount = uint16(len(dns.Ns))
-	if err == nil {
-		dns.Extra, _, err = unpackRRslice(int(dh.Arcount), msg, off)
-	}
-	// The header counts might have been wrong so we need to update it
-	dh.Arcount = uint16(len(dns.Extra))
-
-	if err == nil && IsDSOHeader(dh) {
+	opcode := int(dh.Bits>>11) & 0xF
+	switch opcode {
+	case OpcodeStateful:
 		dns.Stateful, _, err = unpackDSOslice(msg, off)
-	}
+	default:
+		// Qdcount, Ancount, Nscount, Arcount can't be trusted, as they are
+		// attacker controlled. This means we can't use them to pre-allocate
+		// slices.
+		dns.Question = nil
+		for i := 0; i < int(dh.Qdcount); i++ {
+			off1 := off
+			var q Question
+			q, off, err = unpackQuestion(msg, off)
+			if err != nil {
+				return err
+			}
+			if off1 == off { // Offset does not increase anymore, dh.Qdcount is a lie!
+				dh.Qdcount = uint16(i)
+				break
+			}
+			dns.Question = append(dns.Question, q)
+		}
 
-	// Set extended Rcode
-	if opt := dns.IsEdns0(); opt != nil {
-		dns.Rcode |= opt.ExtendedRcode()
+		dns.Answer, off, err = unpackRRslice(int(dh.Ancount), msg, off)
+		// The header counts might have been wrong so we need to update it
+		dh.Ancount = uint16(len(dns.Answer))
+		if err == nil {
+			dns.Ns, off, err = unpackRRslice(int(dh.Nscount), msg, off)
+		}
+		// The header counts might have been wrong so we need to update it
+		dh.Nscount = uint16(len(dns.Ns))
+		if err == nil {
+			dns.Extra, _, err = unpackRRslice(int(dh.Arcount), msg, off)
+		}
+		// The header counts might have been wrong so we need to update it
+		dh.Arcount = uint16(len(dns.Extra))
+
+		// Set extended Rcode
+		if opt := dns.IsEdns0(); opt != nil {
+			dns.Rcode |= opt.ExtendedRcode()
+		}
 	}
 
 	// TODO(miek) make this an error?
