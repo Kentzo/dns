@@ -70,7 +70,7 @@ func dsoTypeToString(t uint16) string {
 // PackDSO creates wire format from the DSO TLV.
 func PackDSO(tlv DSO, msg []byte, off int, compression compressionMap, compress bool) (headerEnd int, off1 int, err error) {
 	if tlv == nil {
-		return len(msg), len(msg), &Error{"nil dso"}
+		return len(msg), len(msg), &Error{"nil DSO"}
 	}
 
 	off, err = packUint16(uint16(tlv.DSOType()), msg, off)
@@ -167,74 +167,46 @@ func SetDSOClose(m *Msg, retryDelay time.Duration, rcode int) *Msg {
 	return m
 }
 
-// IsDSOHeader checks whether Header (wire format) is appropriate for DSO message.
-// See RFC 8490, Section 5.4 and 5.4.1
-func IsDSOHeader(dh Header) bool {
-	opcode := int(dh.Bits>>11) & 0xF
-	response := dh.Bits&_QR != 0
-
-	isStateful := opcode == OpcodeStateful
-	isStateful = isStateful && (!response || dh.Id != 0)
-	isStateful = isStateful && dh.Qdcount == 0 && dh.Ancount == 0 && dh.Nscount == 0 && dh.Arcount == 0
-	return isStateful
-}
-
-// isDSOMsg checks whether Msg is a DSO message.
+// IsDSORequest checks whether Msg is a DSO request message.
 //
 // The decision is based on MsgHdr. To verify that message's TLV(s) are appopriate
 // use the IsValidDSOMsg.
-func isDSOMsg(m *Msg) bool {
-	switch {
-	case m == nil:
-		return false
-	case m.MsgHdr.Opcode != OpcodeStateful:
-		return false
-	case m.MsgHdr.Response && m.MsgHdr.Id == 0:
-		return false
-	case len(m.Question) != 0 || len(m.Answer) != 0 || len(m.Ns) != 0 || len(m.Extra) != 0:
-		return false
-	default:
-		return true
-	}
+func IsDSORequest(m *Msg) bool {
+	return m.MsgHdr.Id != 0 && !m.MsgHdr.Response && len(m.Stateful) > 0
 }
 
-// isDSORequest checks whether Msg is a DSO request message.
+// IsDSOUnidirectional checks whether Msg is a DSO unidirectional message.
 //
 // The decision is based on MsgHdr. To verify that message's TLV(s) are appopriate
 // use the IsValidDSOMsg.
-func isDSORequest(m *Msg) bool {
-	return isDSOMsg(m) && m.MsgHdr.Id != 0 && !m.MsgHdr.Response && len(m.Stateful) > 0
+func IsDSOUnidirectional(m *Msg) bool {
+	return m.MsgHdr.Id == 0 && !m.MsgHdr.Response && len(m.Stateful) > 0
 }
 
-// isDSOUnidirectional checks whether Msg is a DSO unidirectional message.
+// IsDSOResponse checks whether Msg is a DSO response message.
 //
 // The decision is based on MsgHdr. To verify that message's TLV(s) are appopriate
 // use the IsValidDSOMsg.
-func isDSOUnidirectional(m *Msg) bool {
-	return isDSOMsg(m) && m.MsgHdr.Id == 0 && !m.MsgHdr.Response && len(m.Stateful) > 0
-}
-
-// isDSOResponse checks whether Msg is a DSO unidirectional message.
-//
-// The decision is based on MsgHdr. To verify that message's TLV(s) are appopriate
-// use the IsValidDSOMsg.
-func isDSOResponse(m *Msg) bool {
-	return isDSOMsg(m) && m.MsgHdr.Id != 0 && m.MsgHdr.Response
+func IsDSOResponse(m *Msg) bool {
+	return m.MsgHdr.Id != 0 && m.MsgHdr.Response
 }
 
 // IsValidDSOMsg checks that Msg, including its TLVs, is valid when composed on server (server = true)
 // or client (server = false). Optionally, the request message can be passed to verify that Msg
 // is a valid response.
 //
-// Validation errors are fatal and must be followed up by forcibly closing the connection.
 // Error type indicates invalid part of the message.
 func IsValidDSOMsg(m *Msg, server bool, req *Msg) error {
-	if !isDSOMsg(m) {
-		return &Error{"invalid dso header"}
+	if m.Opcode != OpcodeStateful {
+		return ErrOpcode
 	}
-	if req != nil && !isDSORequest(req) {
-		return &Error{"req is invalid dso request"}
+
+	// RFC 8490, Section 5.4: If a DSO message is received where any of the count fields are not
+	// zero, then a FORMERR MUST be returned.
+	if len(m.Question) != 0 || len(m.Answer) != 0 || len(m.Ns) != 0 || len(m.Extra) != 0 {
+		return fmt.Errorf("%w: non-empty RR", ErrRdata)
 	}
+
 	// RFC 8490, Section 5.4.1: If a DSO response message (QR=1) is received where the
 	// MESSAGE ID is zero, this is a fatal error
 	if m.Response && m.Id == 0 {
@@ -253,12 +225,12 @@ func IsValidDSOMsg(m *Msg, server bool, req *Msg) error {
 	// RFC 8490, Section 5.4.2: A DSO request message or DSO unidirectional message
 	// MUST contain at least one TLV.
 	if !m.Response && len(m.Stateful) == 0 {
-		return fmt.Errorf("%w: missing primary tlv", ErrRdata)
+		return fmt.Errorf("%w: missing primary DSO TLV", ErrRdata)
 	}
 
-	// RFC 8490, Section 3: in a DSO response, any TLVs with the same DSO-TYPE as
-	// the Primary TLV from the corresponding DSO request message. If present,
-	// any Response Primary TLV(s) MUST appear first in the DSO response message,
+	// RFC 8490, Section 3: Response Primary TLV: in a DSO response, any TLVs with
+	// the same DSO-TYPE as the Primary TLV from the corresponding DSO request message.
+	// If present, any Response Primary TLV(s) MUST appear first in the DSO response message,
 	// before any Response Additional TLVs.
 	respPrimary := req != nil && len(m.Stateful) > 0 && m.Stateful[0].DSOType() == req.Stateful[0].DSOType()
 	for i, tlv := range m.Stateful {
@@ -306,20 +278,20 @@ func isDSOCompressible(m *Msg) bool {
 // All values are in milliseconds.
 const (
 	// RFC 8490, Section 6.2: On a new DSO Session, if no explicit DSO Keepalive message exchange
-    // has taken place, the default value for both timeouts is 15 seconds.
-	DSOInactivityTimeoutDefault    = 15 * 1000
-	DSOKeepAliveIntervalDefault    = 15 * 1000
+	// has taken place, the default value for both timeouts is 15 seconds.
+	DSOInactivityTimeoutDefault = 15 * time.Second
+	DSOKeepAliveIntervalDefault = 15 * time.Second
 	// RFC 8490, Section 6.5.2: By default, it is RECOMMENDED that clients request, and servers
-    // grant, a keepalive interval of 60 minutes.
-	DSOKeepAliveIntervalRecommened = 60 * 60 * 1000
+	// grant, a keepalive interval of 60 minutes.
+	DSOKeepAliveIntervalRecommened = 60 * time.Minute
 	// RFC 8490, Section 7.1: The keepalive interval MUST NOT be less than ten seconds.
-	DSOKeepAliveIntervalMin        = 10 * 1000
+	DSOKeepAliveIntervalMin = 10 * time.Second
 	// RFC 8490, Section 6.5.2: A keepalive interval value of 0xFFFFFFFF represents "infinity"
 	// and informs the client that it should generate no DSO keepalive traffic.
-	DSOKeepAliveIntervalNever      = 0xFFFFFFFF
+	DSOKeepAliveIntervalNever = 0xFFFFFFFF
 	// RFC 8490, Section 6.4.2: An inactivity timeout of 0xFFFFFFFF represents "infinity"
 	// and informs the client that it may keep an idle connection open as long as it wishes.
-	DSOInactivityTimeoutNever	   = 0xFFFFFFFF
+	DSOInactivityTimeoutNever = 0xFFFFFFFF
 )
 
 // RFC 8490, Section 7.1: Keepalive TLV.
@@ -377,7 +349,7 @@ func (tlv *DSOKeepAlive) validate(server bool, msg *Msg, i int, primary bool, re
 		return fmt.Errorf("%w: bad keepalive response tlv", ErrRdata)
 	}
 
-	if server && tlv.KeepAliveInterval < DSOKeepAliveIntervalMin {
+	if server && tlv.KeepAliveInterval < uint32(DSOKeepAliveIntervalMin.Milliseconds()) {
 		return fmt.Errorf("%w: bad keepalive interval", ErrRdata)
 	}
 
@@ -579,7 +551,7 @@ func (tlv *DSOEncryptionPadding) unpack(buf []byte, off int) (int, error) {
 type DSOLocal struct {
 	dsotype uint16
 	// TLV data in wire format verbatim.
-	Data    []byte
+	Data []byte
 }
 
 // DSOType implements DSO.DSOType
@@ -637,7 +609,7 @@ type DSO8765Subscribe struct {
 	//
 	// DNS wildcarding is not supported, case insensitivity applies, CNAME matches
 	// only a CNAME record.
-	Name   string
+	Name string
 	// Type of RR that subscriber wants.
 	//
 	// TypeANY (255) is interepreted to mean "ALL".
@@ -645,7 +617,7 @@ type DSO8765Subscribe struct {
 	// Class of RR that subscriber wants.
 	//
 	// ClassANY (255) is interpreted to mean "ALL".
-	Class  uint16
+	Class uint16
 }
 
 // DSOType implements DSO.DSOType
@@ -751,7 +723,7 @@ func (tlv *DSO8765Subscribe) unpack(buf []byte, off int) (off1 int, err error) {
 const (
 	// RFC 8765, Section 6.3.1: If the TTL has the value 0xFFFFFFFF, then the DNS Resource Record
 	// with the given name, type, class, and RDATA is removed.
-	DSO8765PushTTLRemove 		   = 0xFFFFFFFF
+	DSO8765PushTTLRemove = 0xFFFFFFFF
 	// RFC 8765, Section 6.3.1: If the TTL has the value 0xFFFFFFFE, then this is a 'collective'
 	// remove notification.
 	DSO8765PushTTLCollectiveRemove = 0xFFFFFFFE
@@ -1114,13 +1086,13 @@ type tlvUsage struct {
 	msg         *Msg
 }
 
-func (u tlvUsage) c_p() bool { return !u.server && isDSORequest(u.msg) && u.primary }
-func (u tlvUsage) c_u() bool { return !u.server && isDSOUnidirectional(u.msg) && u.primary }
-func (u tlvUsage) c_a() bool { return !u.server && !isDSOResponse(u.msg) && !u.primary }
-func (u tlvUsage) crp() bool { return u.server && isDSOResponse(u.msg) && u.respPrimary }
-func (u tlvUsage) cra() bool { return u.server && isDSOResponse(u.msg) && !u.respPrimary }
-func (u tlvUsage) s_p() bool { return u.server && isDSORequest(u.msg) && u.primary }
-func (u tlvUsage) s_u() bool { return u.server && isDSOUnidirectional(u.msg) && u.primary }
-func (u tlvUsage) s_a() bool { return u.server && !isDSOResponse(u.msg) && !u.primary }
-func (u tlvUsage) srp() bool { return !u.server && isDSOResponse(u.msg) && u.respPrimary }
-func (u tlvUsage) sra() bool { return !u.server && isDSOResponse(u.msg) && !u.respPrimary }
+func (u tlvUsage) c_p() bool { return !u.server && IsDSORequest(u.msg) && u.primary }
+func (u tlvUsage) c_u() bool { return !u.server && IsDSOUnidirectional(u.msg) && u.primary }
+func (u tlvUsage) c_a() bool { return !u.server && !IsDSOResponse(u.msg) && !u.primary }
+func (u tlvUsage) crp() bool { return u.server && IsDSOResponse(u.msg) && u.respPrimary }
+func (u tlvUsage) cra() bool { return u.server && IsDSOResponse(u.msg) && !u.respPrimary }
+func (u tlvUsage) s_p() bool { return u.server && IsDSORequest(u.msg) && u.primary }
+func (u tlvUsage) s_u() bool { return u.server && IsDSOUnidirectional(u.msg) && u.primary }
+func (u tlvUsage) s_a() bool { return u.server && !IsDSOResponse(u.msg) && !u.primary }
+func (u tlvUsage) srp() bool { return !u.server && IsDSOResponse(u.msg) && u.respPrimary }
+func (u tlvUsage) sra() bool { return !u.server && IsDSOResponse(u.msg) && !u.respPrimary }
