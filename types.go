@@ -188,7 +188,9 @@ const (
 	StatefulTypeKeepAlive
 	StatefulTypeRetryDelay
 	StatefulTypeEncryptionPadding
+)
 
+const (
 	StatefulType8765Subscribe uint16 = iota + 0x0040
 	StatefulType8765Push
 	StatefulType8765Unsubscribe
