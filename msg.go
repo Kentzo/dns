@@ -1031,7 +1031,7 @@ func msgLenWithCompressionMap(dns *Msg, compression map[string]struct{}) int {
 	}
 	for _, r := range dns.Stateful {
 		if r != nil {
-			l += r.len(l, compression)
+			l += r.len(l, compression) + 2 + 2
 		}
 	}
 
