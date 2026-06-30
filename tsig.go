@@ -180,10 +180,8 @@ func TsigGenerateWithProvider(m *Msg, provider TsigProvider, requestMAC string, 
 		return nil, "", err
 	}
 
-	buf, err := tsigBuffer(mbuf, rr, requestMAC, timersOnly)
-	if err != nil {
-		return nil, "", err
-	}
+	// Replace message ID in header with original ID from TSIG
+	binary.BigEndian.PutUint16(mbuf[0:2], rr.OrigId)
 
 	t := new(TSIG)
 	// Copy all TSIG fields except MAC, its size, and time signed which are filled when signing.
@@ -194,6 +192,10 @@ func TsigGenerateWithProvider(m *Msg, provider TsigProvider, requestMAC string, 
 
 	// Sign unless there is a key or MAC validation error (RFC 8945 5.3.2)
 	if rr.Error != RcodeBadKey && rr.Error != RcodeBadSig {
+		buf, err := tsigBuffer(mbuf, rr, requestMAC, timersOnly)
+		if err != nil {
+			return nil, "", err
+		}
 		mac, err := provider.Generate(buf, rr)
 		if err != nil {
 			return nil, "", err
